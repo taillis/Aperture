@@ -21,6 +21,7 @@ mod cpu_sensor;
 mod deepcool;
 mod foreground;
 mod fps_etw;
+mod game_info;
 mod gpu_nvml;
 mod layouts;
 mod gpu;
@@ -235,6 +236,8 @@ struct Config {
     /// Background position/fit.
     bg_layout: BgLayout,
     ui: UiOptions,
+    /// Game metadata + artwork lookup settings.
+    game_art: game_info::GameArtConfig,
     /// `--preview-png`: draw ONE frame with sample data into a PNG and exit (used by the
     /// settings editor `aperture-config` for its live preview; nothing is sent to the LCD).
     preview: Option<PreviewReq>,
@@ -259,6 +262,8 @@ enum PreviewState {
     Playing,
     /// The now-playing card (only when `music_screen = true`).
     Music,
+    /// Active game session (game logo/poster + FPS telemetry).
+    Game,
 }
 
 fn print_help() {
@@ -580,12 +585,13 @@ fn parse_args() -> anyhow::Result<Config> {
             "--preview-time" => preview_secs = next_f32(&mut args, "--preview-time")? as f64,
             "--preview-layout" => preview_layout = next_u64(&mut args, "--preview-layout")? as usize,
             "--preview-state" => {
-                let raw = args.next().ok_or_else(|| anyhow::anyhow!("--preview-state requires idle | playing | music"))?;
+                let raw = args.next().ok_or_else(|| anyhow::anyhow!("--preview-state requires idle | playing | music | game"))?;
                 preview_state = match raw.to_ascii_lowercase().as_str() {
                     "idle" => PreviewState::Idle,
                     "playing" | "spectrum" => PreviewState::Playing,
                     "music" => PreviewState::Music,
-                    _ => anyhow::bail!("--preview-state: '{raw}' not valid (idle | playing | music)"),
+                    "game" => PreviewState::Game,
+                    _ => anyhow::bail!("--preview-state: '{raw}' not valid (idle | playing | music | game)"),
                 };
             }
             "--diag" => {
@@ -682,6 +688,22 @@ fn parse_args() -> anyhow::Result<Config> {
     }
     let fps_monitor = file.get_bool("fps_monitor").map_err(|e| anyhow::anyhow!(e))?.unwrap_or(true);
     let fps_ignore = fps_etw::parse_ignore(file.get("fps_ignore").unwrap_or(""));
+    let game_art_enabled = file.get_bool("game_art").map_err(|e| anyhow::anyhow!(e))?.unwrap_or(true);
+    let game_art_source = match file.get("game_art_source").map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("auto") => "auto".to_string(),
+        Some("steam") => "steam".to_string(),
+        Some("steamgriddb") => "steamgriddb".to_string(),
+        Some("local") => "local".to_string(),
+        Some(v) => anyhow::bail!("game_art_source: '{v}' not valid (auto | steam | steamgriddb | local)"),
+    };
+    let steamgriddb_key = file.get("steamgriddb_key").unwrap_or("").trim().to_string();
+    let overrides = game_info::parse_game_overrides(file.get("game_art_override").unwrap_or(""));
+    let game_art = game_info::GameArtConfig {
+        enabled: game_art_enabled,
+        source: game_art_source,
+        steamgriddb_key,
+        overrides,
+    };
     let ui = parse_ui_options(&file)?;
     let bg_layout = parse_bg_layout(&file)?;
     let orientation = match orientation_cli {
@@ -761,6 +783,7 @@ fn parse_args() -> anyhow::Result<Config> {
         fps_ignore,
         bg_layout,
         ui,
+        game_art,
         preview: preview_path
             .map(|path| PreviewReq { path, secs: preview_secs, state: preview_state, layout: preview_layout }),
     })
@@ -787,6 +810,7 @@ const OVERRIDE_KEYS: &[&str] = &[
     "pixel_game", "pixel_game_hero", "pixel_game_height", "pixel_game_hud",
     "background_effect", "effect_palette", "effect_colors", "effect_palette_interval",
     "effect_speed", "effect_scale", "effect_brightness", "effect_fps", "effect_level", "effect_theme",
+    "game_art", "game_art_source", "steamgriddb_key", "game_art_override",
     "panel", "panel_size",
 ];
 
@@ -1818,6 +1842,9 @@ fn main() -> anyhow::Result<()> {
         eprintln!("WARNING: master volume could not be read, the info line will show N/A.");
     }
     let (now_playing, track_shared) = media::spawn_track_watcher()?;
+    let (game_watcher, game_shared) = game_info::spawn_game_watcher()?;
+    #[allow(unused_mut)]
+    let mut active_game_proc: Option<(String, String)> = None;
     let mut music = music_screen::MusicScreen::new();
     let mut game = pixel_game::PixelGame::new();
     let mut bg_effect = effect::Effect::new();
@@ -2140,19 +2167,22 @@ fn main() -> anyhow::Result<()> {
                 // keeps reporting on the desktop.
                 let etw_running = fps_etw::status() == fps_etw::Status::Running;
                 let measured = if config.fps_monitor && etw_running {
-                    fps_target.sample(foreground::foreground_process(), &config.fps_ignore, fps_etw::fps_for_pid)
-                        .map(|(s, name)| (s, name.to_string()))
+                    let fg = foreground::foreground_process_info().map(|f| (f.pid, f.name, f.path));
+                    fps_target
+                        .sample_with_path(fg, &config.fps_ignore, fps_etw::fps_for_pid)
+                        .map(|(s, name, path)| (s, name.to_string(), path.to_string()))
                 } else {
                     None
                 };
+                active_game_proc = measured.as_ref().map(|(_, name, path)| (name.clone(), path.clone()));
                 let driver_fps = latest_gpu_data.fps.filter(|f| *f > 0);
                 latest_gpu_data.fps = match &measured {
-                    Some((s, _)) => Some(s.fps.round() as i32),
+                    Some((s, _, _)) => Some(s.fps.round() as i32),
                     None if !etw_running && config.fps_monitor => driver_fps,
                     None => None,
                 };
                 set_status("fps_source", match &measured {
-                    Some((s, _)) => s.api.name(),
+                    Some((s, _, _)) => s.api.name(),
                     None if latest_gpu_data.fps.is_some() => "GPU driver",
                     None => "none",
                 });
@@ -2166,17 +2196,46 @@ fn main() -> anyhow::Result<()> {
                 });
             }
         }
-        // "Gaming" mode detection: GPU usage > 50%. Used for two things:
-        // swap the "NOW PLAYING" content for the foreground exe name, AND replace the
-        // EQ bar/clock area with the performance dashboard (see draw_game_dashboard).
-        let gaming_mode = latest_gpu_percent.is_some_and(|p| p > 50.0);
+        // "Gaming" mode detection: GPU usage > 50% (or APERTURE_FAKE_GAME test override).
+        let fake_game = std::env::var("APERTURE_FAKE_GAME").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        let gaming_mode = latest_gpu_percent.is_some_and(|p| p > 50.0) || fake_game.is_some();
+
+        let game_proc_now: Option<(String, String)> = if let Some(fake) = &fake_game {
+            let file_name = fake.rsplit(['\\', '/']).next().unwrap_or(fake);
+            let stem = file_name.strip_suffix(".exe").or_else(|| file_name.strip_suffix(".EXE")).unwrap_or(file_name);
+            let path = if fake.contains(['\\', '/']) { fake.clone() } else { String::new() };
+            Some((stem.to_string(), path))
+        } else if let Some((name, path)) = &active_game_proc {
+            Some((name.clone(), path.clone()))
+        } else if gaming_mode {
+            foreground::foreground_process_info()
+                .filter(|f| !fps_etw::is_ignored(&f.name, &config.fps_ignore))
+                .map(|f| (f.name, f.path))
+        } else {
+            None
+        };
+        if config.game_art.enabled {
+            let (g_name, g_path) = match &game_proc_now {
+                Some((n, p)) => (Some(n.as_str()), p.as_str()),
+                None => (None, ""),
+            };
+            game_watcher.update(g_name, g_path, &config.game_art);
+        } else {
+            game_watcher.update(None, "", &config.game_art);
+        }
+        let latest_game_info = if config.game_art.enabled {
+            game_shared.lock().ok().and_then(|g| g.clone())
+        } else {
+            None
+        };
 
         // The "NOW PLAYING" title is usually the song/media being played, BUT if GPU
-        // usage is high (indicating gaming), it's replaced with the name of the
-        // .exe program that's currently the foreground window (e.g. the game's
-        // own name) — more useful than a background song title while gaming.
+        // usage is high (indicating gaming), it's replaced with the detected game title.
         let now_playing_title = if gaming_mode {
-            foreground::foreground_exe_name()
+            latest_game_info
+                .as_ref()
+                .map(|g| g.title.clone())
+                .or_else(|| foreground::foreground_exe_name())
                 .or_else(|| now_playing.lock().ok().and_then(|g| g.clone()))
         } else {
             now_playing.lock().ok().and_then(|g| g.clone())
@@ -2335,6 +2394,7 @@ fn main() -> anyhow::Result<()> {
                 fahrenheit: opts().weather_fahrenheit,
                 uptime_s: System::uptime(),
                 track: track.as_ref(),
+                game: latest_game_info.as_ref(),
             };
             pro_screen.draw(&mut fb, area, &data);
         }
@@ -2661,6 +2721,7 @@ fn render_preview(config: &Config, req: &PreviewReq) -> anyhow::Result<Framebuff
             superio::Fan { label: "Pump Fan".into(), rpm: 2350 },
             superio::Fan { label: "System Fan 1".into(), rpm: 960 },
         ];
+        let sample_game = (req.state == PreviewState::Game).then(|| Arc::new(game_info::sample_game_info()));
         let mut data = pro::Data {
             cpu_name: "AMD Ryzen 7 5800X",
             cores: (8, 16),
@@ -2668,7 +2729,7 @@ fn render_preview(config: &Config, req: &PreviewReq) -> anyhow::Result<Framebuff
             cpu_temp: wd.cpu_temp,
             cpu_power: wd.cpu_power,
             cpu_mhz: wd.cpu_mhz,
-            gpu_pct: wd.gpu_pct,
+            gpu_pct: if req.state == PreviewState::Game { Some(84.0) } else { wd.gpu_pct },
             gpu: &gpu,
             ram_used_mb: 21_319,
             ram_total_mb: 32_691,
@@ -2681,6 +2742,7 @@ fn render_preview(config: &Config, req: &PreviewReq) -> anyhow::Result<Framebuff
             fahrenheit: o.weather_fahrenheit,
             uptime_s: 3 * 86_400 + 4 * 3600 + 12 * 60,
             track: (req.state != PreviewState::Idle).then_some(&track),
+            game: sample_game.as_ref(),
         };
         if preview_empty {
             data.cpu_temp = None;
@@ -2692,6 +2754,7 @@ fn render_preview(config: &Config, req: &PreviewReq) -> anyhow::Result<Framebuff
             data.disk = None;
             data.weather = None;
             data.track = None;
+            data.game = None;
         }
         let mut screen = pro::ProScreen::new();
         screen.seed_demo_history();

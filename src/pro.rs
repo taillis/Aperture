@@ -29,6 +29,8 @@ use std::time::Instant;
 
 #[path = "pro_designs.rs"]
 mod designs;
+#[path = "pro_showcase.rs"]
+mod showcase;
 
 type Rgb = (u8, u8, u8);
 type R = (f32, f32, f32, f32);
@@ -180,12 +182,14 @@ pub enum Layout {
     Chart,
     /// Music first: a large album cover tile.
     Player,
+    /// Full-bleed game poster / hero background with logo and telemetry cards.
+    Showcase,
 }
 
 impl Layout {
     pub const CURATED: [Layout; 13] = [Layout::Board, Layout::Studio, Layout::Pulse, Layout::Cluster, Layout::Panorama, Layout::Cinema, Layout::Axis, Layout::Ledger, Layout::Duet, Layout::Orbit, Layout::Atelier, Layout::Focus, Layout::Grid];
     /// The landscape designs (what `pro_layout = all` rotates through).
-    pub const ALL: [Layout; 29] = [Layout::Board, Layout::Studio, Layout::Pulse, Layout::Cluster, Layout::Panorama, Layout::Cinema, Layout::Axis, Layout::Ledger, Layout::Duet, Layout::Orbit, Layout::Atelier, Layout::Focus, Layout::Grid, Layout::Stack, Layout::Mosaic, Layout::Mixer, Layout::Chart, Layout::Player, Layout::Tint, Layout::Glass, Layout::Gauge, Layout::Swiss, Layout::Classic, Layout::Cockpit, Layout::Bento, Layout::Terminal, Layout::Chamfer, Layout::Rings, Layout::Dots];
+    pub const ALL: [Layout; 30] = [Layout::Board, Layout::Studio, Layout::Pulse, Layout::Cluster, Layout::Panorama, Layout::Cinema, Layout::Axis, Layout::Ledger, Layout::Duet, Layout::Orbit, Layout::Atelier, Layout::Focus, Layout::Grid, Layout::Stack, Layout::Mosaic, Layout::Mixer, Layout::Chart, Layout::Player, Layout::Showcase, Layout::Tint, Layout::Glass, Layout::Gauge, Layout::Swiss, Layout::Classic, Layout::Cockpit, Layout::Bento, Layout::Terminal, Layout::Chamfer, Layout::Rings, Layout::Dots];
     /// The portrait designs (screen mounted vertically; `pro_layout = portrait`).
     pub const PORTRAIT: [Layout; 5] = [Layout::Lock, Layout::Equalizer, Layout::Receipt, Layout::Synthwave, Layout::Blueprint];
     pub fn name(self) -> &'static str {
@@ -224,11 +228,12 @@ impl Layout {
             Layout::Mixer => "mixer",
             Layout::Chart => "chart",
             Layout::Player => "player",
+            Layout::Showcase => "showcase",
         }
     }
     /// The clean collection, drawn with Inter.
     pub fn clean(self) -> bool {
-        matches!(self, Layout::Board | Layout::Studio | Layout::Pulse | Layout::Cluster | Layout::Panorama | Layout::Cinema | Layout::Axis | Layout::Ledger | Layout::Duet | Layout::Orbit | Layout::Atelier | Layout::Focus | Layout::Grid | Layout::Tint | Layout::Glass | Layout::Gauge | Layout::Stack | Layout::Mosaic | Layout::Mixer | Layout::Chart | Layout::Player)
+        matches!(self, Layout::Board | Layout::Studio | Layout::Pulse | Layout::Cluster | Layout::Panorama | Layout::Cinema | Layout::Axis | Layout::Ledger | Layout::Duet | Layout::Orbit | Layout::Atelier | Layout::Focus | Layout::Grid | Layout::Tint | Layout::Glass | Layout::Gauge | Layout::Stack | Layout::Mosaic | Layout::Mixer | Layout::Chart | Layout::Player | Layout::Showcase)
     }
     /// Drawn on a 462 x 1920 canvas and turned 90 degrees onto the panel.
     pub fn portrait(self) -> bool {
@@ -237,6 +242,14 @@ impl Layout {
     fn find(name: &str) -> Option<Layout> {
         Layout::ALL.iter().chain(Layout::PORTRAIT.iter()).copied().find(|l| l.name() == name)
     }
+}
+
+/// Artwork mode when a running game occupies the music/media slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GameArtMode {
+    #[default]
+    Logo,
+    Cover,
 }
 
 /// `pro_layout`, `pro_theme`, `pro_style`, `pro_theme_interval` from trofeo.conf.
@@ -256,6 +269,14 @@ pub struct Settings {
     /// Layout / theme to switch to while a game reports FPS.
     pub game_layout: Option<Layout>,
     pub game_theme: Option<Theme>,
+    /// Show running game logo/cover + title in the music slot across dashboards.
+    pub game_media: bool,
+    /// Artwork mode in music slot (`logo` | `cover`).
+    pub game_art_mode: GameArtMode,
+    /// Custom background poster/image path for the `showcase` dashboard.
+    pub game_poster: String,
+    /// Darken percent (0-100) applied over the `showcase` poster background.
+    pub game_bg_dim: u32,
     /// Night schedule (start, end) in minutes after midnight, its theme and brightness (percent).
     pub night: Option<(u32, u32)>,
     pub night_theme: Option<Theme>,
@@ -281,7 +302,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { layouts: vec![Layout::Axis], themes: vec![THEMES[0]], style: Style::Cards, interval_min: 30, cover_color: true, song_popup: true, rotate_ccw: false, game_layout: None, game_theme: None, night: None, night_theme: None, night_dim: 40, alert_cpu: 0, alert_gpu: 0, clock12: false, fan_sensor: String::new(), gpu_fan_sensor: String::new(), logo: String::new(), amd_adapter: String::new(), edit_layout: String::new(), edit_background: false, edit_hidden: String::new(), edit_text_scale: 1., edit_widgets: Vec::new(), custom_enabled: false, custom_widgets: Vec::new() }
+        Settings { layouts: vec![Layout::Axis], themes: vec![THEMES[0]], style: Style::Cards, interval_min: 30, cover_color: true, song_popup: true, rotate_ccw: false, game_layout: None, game_theme: None, game_media: true, game_art_mode: GameArtMode::Logo, game_poster: String::new(), game_bg_dim: 45, night: None, night_theme: None, night_dim: 40, alert_cpu: 0, alert_gpu: 0, clock12: false, fan_sensor: String::new(), gpu_fan_sensor: String::new(), logo: String::new(), amd_adapter: String::new(), edit_layout: String::new(), edit_background: false, edit_hidden: String::new(), edit_text_scale: 1., edit_widgets: Vec::new(), custom_enabled: false, custom_widgets: Vec::new() }
     }
 }
 
@@ -522,6 +543,25 @@ pub fn parse(file: &ConfigFile) -> anyhow::Result<Settings> {
             _ => anyhow::bail!("pro_rotate: '{v}' not valid (cw | ccw)"),
         };
     }
+    if let Some(v) = file.get("pro_game_media") {
+        s.game_media = flag("pro_game_media", v)?;
+    }
+    if let Some(v) = file.get("pro_game_art") {
+        s.game_art_mode = match v.trim().to_ascii_lowercase().as_str() {
+            "logo" => GameArtMode::Logo,
+            "cover" | "poster" => GameArtMode::Cover,
+            _ => anyhow::bail!("pro_game_art: '{v}' not valid (logo | cover)"),
+        };
+    }
+    if let Some(v) = file.get("pro_game_poster") {
+        s.game_poster = v.trim().to_string();
+    }
+    if let Some(v) = file.get_u32("pro_game_bg_dim").map_err(|e| anyhow::anyhow!(e))? {
+        if v > 100 {
+            anyhow::bail!("pro_game_bg_dim: must be between 0 and 100");
+        }
+        s.game_bg_dim = v;
+    }
     Ok(s)
 }
 
@@ -579,6 +619,7 @@ const HOT: Rgb = (248, 82, 82);
 const HIST: usize = 120;
 
 /// Everything the screen shows (filled by the main loop or the preview).
+#[derive(Clone, Copy)]
 pub struct Data<'a> {
     pub cpu_name: &'a str,
     pub cores: (usize, usize),
@@ -603,6 +644,7 @@ pub struct Data<'a> {
     pub fahrenheit: bool,
     pub uptime_s: u64,
     pub track: Option<&'a Arc<TrackInfo>>,
+    pub game: Option<&'a Arc<crate::game_info::GameInfo>>,
 }
 
 struct Cover {
@@ -665,6 +707,8 @@ pub struct ProScreen {
     last_push: Option<Instant>,
     hist_ver: u64,
     cover: Option<Cover>,
+    game_cover: Option<(String, Cover)>,
+    showcase_bg: Option<(String, Layer)>,
     logo: (String, Option<Cover>),
     /// Layout / colors drawn last, and the frame they made: a change cross-fades from it.
     look: String,
@@ -752,6 +796,8 @@ impl ProScreen {
             last_push: None,
             hist_ver: 0,
             cover: None,
+            game_cover: None,
+            showcase_bg: None,
             logo: (String::new(), None),
             look: String::new(),
             fade: None,
@@ -959,6 +1005,48 @@ impl ProScreen {
         self.cover = Some(Cover::new(key, size, rgb));
     }
 
+    fn update_game_cover(&mut self, game: Option<&Arc<crate::game_info::GameInfo>>, mode: GameArtMode, bg: Rgb) {
+        let Some(g) = game else {
+            self.game_cover = None;
+            return;
+        };
+        let key = format!(
+            "{}|{:?}|{}|{}|{}|{:?}",
+            g.key,
+            mode,
+            g.logo.is_some(),
+            g.poster.is_some(),
+            g.hero.is_some(),
+            bg
+        );
+        if self.game_cover.as_ref().is_some_and(|(k, _)| k == &key) {
+            return;
+        }
+        let rgb = match mode {
+            GameArtMode::Logo => g
+                .logo
+                .as_ref()
+                .map(|l| crate::game_info::logo_as_square_cover(l, bg.into(), 256))
+                .or_else(|| {
+                    g.poster
+                        .as_ref()
+                        .or(g.hero.as_ref())
+                        .map(|p| crate::game_info::poster_as_square_cover(p, 256))
+                }),
+            GameArtMode::Cover => g
+                .poster
+                .as_ref()
+                .or(g.hero.as_ref())
+                .map(|p| crate::game_info::poster_as_square_cover(p, 256))
+                .or_else(|| {
+                    g.logo
+                        .as_ref()
+                        .map(|l| crate::game_info::logo_as_square_cover(l, bg.into(), 256))
+                }),
+        };
+        self.game_cover = rgb.map(|px| (key, Cover::new(1, 256, px)));
+    }
+
     /// Paints the screen on `fb`; `area` = the part of `fb` the interface may use.
     pub fn draw(&mut self, fb: &mut Framebuffer, area: (u32, u32, u32, u32), d: &Data) {
         let settings = opts().pro;
@@ -1009,9 +1097,43 @@ impl ProScreen {
                 theme = t;
             }
         }
+        let use_game_media = settings.game_media && d.game.is_some();
+        self.update_game_cover(use_game_media.then_some(d.game).flatten(), settings.game_art_mode, theme.panel);
+        let game_track: Option<Arc<TrackInfo>> = if use_game_media {
+            d.game.map(|g| {
+                Arc::new(TrackInfo {
+                    title: g.title.clone(),
+                    artist: if g.source == "Detected" {
+                        "In game".to_string()
+                    } else {
+                        format!("In game · {}", g.source)
+                    },
+                    album: String::new(),
+                    cover: None,
+                    timeline: None,
+                })
+            })
+        } else {
+            None
+        };
+        let eff_d = if use_game_media && layout != Layout::Showcase {
+            Data { track: game_track.as_ref(), ..*d }
+        } else {
+            *d
+        };
+        let osd_d = if use_game_media {
+            Data { track: game_track.as_ref(), ..*d }
+        } else {
+            *d
+        };
         crate::smooth_font::set_family(if layout.clean() { crate::smooth_font::Family::Inter } else { crate::smooth_font::Family::Chakra });
         if settings.cover_color {
-            if let Some(c) = self.cover.as_ref() {
+            let color_src = if use_game_media {
+                self.game_cover.as_ref().map(|c| &c.1).or(self.cover.as_ref())
+            } else {
+                self.cover.as_ref()
+            };
+            if let Some(c) = color_src {
                 let pair = |c: Rgb| [c, lerp_rgb(c, WHITE, 0.45)];
                 theme.cpu = pair(c.palette[0]);
                 theme.gpu = pair(c.palette[1]);
@@ -1030,8 +1152,8 @@ impl ProScreen {
             self.look = look;
         }
         if !settings.custom_enabled && !(settings.edit_background && settings.edit_layout==layout.name()) { fb.clear(theme.bg.0, theme.bg.1, theme.bg.2); }
-        // a new song opens its pop-up (not at start-up, not when the same song resumes)
-        let key = d.track.map(|t| (t.title.clone(), t.artist.clone()));
+        // a new song (or newly launched game) opens its pop-up (not at start-up, not when the same item resumes)
+        let key = osd_d.track.map(|t| (t.title.clone(), t.artist.clone()));
         if let Some(k) = key {
             if self.song_init && self.last_song.as_ref() != Some(&k) && settings.song_popup {
                 self.song_since = Some(Instant::now());
@@ -1039,7 +1161,14 @@ impl ProScreen {
             self.last_song = Some(k);
         }
         self.song_init = true;
-        let progress = d.track.and_then(|t| t.timeline).map(|tl| (tl.position_now_ms() / 1000, tl.duration_ms / 1000));
+        let progress = eff_d.track.and_then(|t| t.timeline).map(|tl| (tl.position_now_ms() / 1000, tl.duration_ms / 1000));
+        let game_sig = d.game.map(|g| (
+            g.key.as_str(),
+            g.title.as_str(),
+            g.logo.is_some(),
+            g.poster.is_some(),
+            g.hero.is_some(),
+        ));
         let sig = format!(
             "{:?}{:?}{:?}|{area:?}|{:?}|{}|{}|{:.0}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}|{:?}|{:.1}{:.1}|{:.0}{:.0}|{:?}|{}|{:?}|{:?}|{}",
             theme,
@@ -1063,10 +1192,18 @@ impl ProScreen {
             d.net_kb.1,
             d.weather.map(|w| (w.temp_c.round() as i32, w.code, w.humidity, w.city.clone())),
             d.uptime_s / 60,
-            d.track.map(|t| (t.title.clone(), t.artist.clone())),
+            eff_d.track.map(|t| (t.title.clone(), t.artist.clone())),
             progress,
             self.hist_ver,
-        ) + &format!("|{}", settings.clock12);
+        ) + &format!(
+            "|{}|{:?}|{}|{:?}|{}|{}",
+            settings.clock12,
+            game_sig,
+            settings.game_media,
+            settings.game_art_mode,
+            settings.game_poster,
+            settings.game_bg_dim
+        );
         let sig = sig + &format!("|{}|{:?}",settings.custom_enabled,(&settings.custom_widgets,&settings.edit_layout,&settings.edit_widgets,&settings.edit_hidden,settings.edit_text_scale, &settings.logo));
         let portrait = !settings.custom_enabled && layout.portrait();
         if sig != self.sig {
@@ -1084,9 +1221,20 @@ impl ProScreen {
                     self.canvas.clear();
                 }
             }
+            if !settings.custom_enabled && layout == Layout::Showcase {
+                showcase::prepare_bg(&mut self.showcase_bg, d, &settings.game_poster, settings.game_bg_dim, cw, ch);
+            }
             let stats = self.session_stats(gaming);
             STATS.with(|s| *s.borrow_mut() = stats);
-            let cover = if !matches!(layout.name(), "axis" | "ledger" | "duet" | "orbit" | "atelier" | "panorama" | "cinema") {
+            let cover = if use_game_media {
+                self.game_cover.as_ref().map(|c| &c.1).or_else(|| {
+                    if !matches!(layout.name(), "axis" | "ledger" | "duet" | "orbit" | "atelier" | "panorama" | "cinema") {
+                        self.cover.as_ref()
+                    } else {
+                        self.logo.1.as_ref().or(self.cover.as_ref())
+                    }
+                })
+            } else if !matches!(layout.name(), "axis" | "ledger" | "duet" | "orbit" | "atelier" | "panorama" | "cinema") {
                 self.cover.as_ref()
             } else {
                 self.logo.1.as_ref().or(self.cover.as_ref())
@@ -1099,11 +1247,12 @@ impl ProScreen {
             let (wf, hf) = (cw as f32, ch as f32);
             let k = if portrait { (wf / 462.0).clamp(0.5, 2.0) } else { (hf / 462.0).min(wf / 1920.0 * 1.15).clamp(0.5, 2.0) };
             let sc = Scale::new(k);
-            if settings.custom_enabled { designs::paint_custom(&mut p,wf,hf,d,&now,&settings.custom_widgets); } else { match layout {
-                Layout::Classic => paint(&mut p, wf, hf, d, &now, hist, cover),
-                Layout::Cockpit => paint_cockpit(&mut p, wf, hf, &sc, d, &now, cover),
-                Layout::Focus => paint_focus(&mut p, wf, hf, &sc, d, &now, hist, cover),
-                _ => designs::paint(layout, &mut p, wf, hf, &sc, d, &now, hist, cover),
+            if settings.custom_enabled { designs::paint_custom(&mut p,wf,hf,&eff_d,&now,&settings.custom_widgets); } else { match layout {
+                Layout::Classic => paint(&mut p, wf, hf, &eff_d, &now, hist, cover),
+                Layout::Cockpit => paint_cockpit(&mut p, wf, hf, &sc, &eff_d, &now, cover),
+                Layout::Focus => paint_focus(&mut p, wf, hf, &sc, &eff_d, &now, hist, cover),
+                Layout::Showcase => showcase::paint(&mut p, wf, hf, &sc, d, &now, hist, cover, self.showcase_bg.as_ref().map(|(_, l)| l)),
+                _ => designs::paint(layout, &mut p, wf, hf, &sc, &eff_d, &now, hist, cover),
             }}
             if portrait {
                 self.canvas.rotate_into(&mut self.layer, settings.rotate_ccw);
@@ -1131,7 +1280,7 @@ impl ProScreen {
         if self.vol_since.is_some_and(|t| t.elapsed().as_secs_f32() < OSD_SECS) {
             self.paint_volume_osd(fb, area);
         } else {
-            self.paint_song_osd(fb, area, d);
+            self.paint_song_osd(fb, area, &osd_d);
         }
         if let Some((old, since)) = &self.fade {
             let t = since.elapsed().as_secs_f32() / FADE_SECS;
@@ -1244,7 +1393,11 @@ impl ProScreen {
         } else {
             self.osd.clear();
         }
-        let cover = self.cover.as_ref();
+        let cover = if d.game.is_some() {
+            self.game_cover.as_ref().map(|c| &c.1).or(self.cover.as_ref())
+        } else {
+            self.cover.as_ref()
+        };
         let accent = cover.map_or(th().text, |c| c.accent);
         let mut p = Painter { layer: &mut self.osd, font: FontStyle::Smooth };
         let r = 26.0 * k;
@@ -1264,7 +1417,8 @@ impl ProScreen {
         let tx = pad + cs + 26.0 * k;
         let tw = w - tx - 28.0 * k;
         circle(&mut p, tx + 5.0 * k, pad + 14.0 * k, 5.0 * k, accent, al(255.0));
-        spaced(&mut p, tx + 18.0 * k, pad + 14.0 * k + sc.s / 2.0, "NOW PLAYING", sc.s, W::Medium, th().muted, 2.0 * k);
+        let badge = if d.game.is_some() { "IN GAME" } else { "NOW PLAYING" };
+        spaced(&mut p, tx + 18.0 * k, pad + 14.0 * k + sc.s / 2.0, badge, sc.s, W::Medium, th().muted, 2.0 * k);
         let title = clean_title(&tr.title);
         let tcap = sc.l;
         let title = ellipsize(&p, &title, tcap, W::Medium, tw);

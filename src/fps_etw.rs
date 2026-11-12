@@ -116,6 +116,7 @@ pub fn parse_ignore(value: &str) -> Vec<String> {
 pub struct Target {
     pid: Option<u32>,
     name: String,
+    path: String,
 }
 
 impl Target {
@@ -125,22 +126,36 @@ impl Target {
         &mut self,
         foreground: Option<(u32, String)>,
         ignore: &[String],
-        mut read: impl FnMut(u32) -> Option<Sample>,
+        read: impl FnMut(u32) -> Option<Sample>,
     ) -> Option<(Sample, &str)> {
-        if let Some((pid, name)) = foreground {
+        let fg = foreground.map(|(pid, name)| (pid, name, String::new()));
+        self.sample_with_path(fg, ignore, read)
+            .map(|(s, name, _path)| (s, name))
+    }
+
+    /// Like `sample`, but also preserves the executable's full path for launcher/manifest lookup.
+    pub fn sample_with_path(
+        &mut self,
+        foreground: Option<(u32, String, String)>,
+        ignore: &[String],
+        mut read: impl FnMut(u32) -> Option<Sample>,
+    ) -> Option<(Sample, &str, &str)> {
+        if let Some((pid, name, path)) = foreground {
             if !is_ignored(&name, ignore) {
                 if let Some(s) = read(pid) {
                     self.pid = Some(pid);
                     self.name = name;
-                    return Some((s, &self.name));
+                    self.path = path;
+                    return Some((s, &self.name, &self.path));
                 }
             }
         }
         // focus is elsewhere (alt-tab, second monitor): the last game, while it keeps rendering
         match self.pid.and_then(|pid| read(pid)) {
-            Some(s) => Some((s, &self.name)),
+            Some(s) => Some((s, &self.name, &self.path)),
             None => {
                 self.pid = None;
+                self.path.clear();
                 None
             }
         }

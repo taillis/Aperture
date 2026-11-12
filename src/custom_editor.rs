@@ -8,12 +8,12 @@ use aperture::custom::{self, Widget};
 const EDITABLE: &[&str] = &["axis", "ledger", "duet", "orbit", "atelier", "panorama", "cinema"];
 
 #[cfg(windows)]
-fn pick_file(name: &str, ext: &[&str]) -> Option<PathBuf> {
+pub(super) fn pick_file(name: &str, ext: &[&str]) -> Option<PathBuf> {
     rfd::FileDialog::new().add_filter(name, ext).pick_file()
 }
 
 #[cfg(not(windows))]
-fn pick_file(_name: &str, _ext: &[&str]) -> Option<PathBuf> {
+pub(super) fn pick_file(_name: &str, _ext: &[&str]) -> Option<PathBuf> {
     None
 }
 

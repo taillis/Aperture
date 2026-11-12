@@ -167,6 +167,7 @@ const LAYOUTS: &[LayoutInfo] = &[
     li("duet", "Duet", "CPU and GPU side by side, a memory rail", "CPU và GPU song song, bộ nhớ thành cột riêng", Group::Aperture),
     li("orbit", "Orbit", "Gauge arcs, a central clock, balanced wings", "Vòng cung, đồng hồ giữa, hai cánh cân đối", Group::Aperture),
     li("atelier", "Atelier", "Album-led, with a full hardware desk", "Ảnh bìa lớn cùng bàn thông số đầy đủ", Group::Aperture),
+    li("showcase", "Showcase", "Game poster backdrop, transparent logo and telemetry", "Poster game toàn màn hình, logo và thông số", Group::Aperture),
     li("focus", "Focus", "Huge numbers, nothing else", "Số cực lớn, tối giản", Group::Signature),
     li("grid", "Grid", "Even tiles like phone widgets", "Ô đều nhau như widget điện thoại", Group::Signature),
     li("stack", "Stack", "Three full-width rows, six readings each", "Ba hàng ngang, mỗi hàng sáu thông số", Group::Signature),
@@ -261,8 +262,16 @@ fn render(exe: &Path, workdir: &Path, text: &str, layout: Option<&str>, music: b
     }
     std::fs::write(&conf, doc.to_text()).ok()?;
     let _ = std::fs::remove_file(&png);
+    let shown = layout.map(str::to_string).unwrap_or_else(|| first_layout.clone());
+    let preview_state = if !music {
+        "idle"
+    } else if shown == "showcase" {
+        "game"
+    } else {
+        "music"
+    };
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--config").arg(&conf).arg("--preview-png").arg(&png).arg("--preview-state").arg(if music { "music" } else { "idle" });
+    cmd.arg("--config").arg(&conf).arg("--preview-png").arg(&png).arg("--preview-state").arg(preview_state);
     cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     if workdir.is_dir() {
         cmd.current_dir(workdir);
@@ -277,7 +286,6 @@ fn render(exe: &Path, workdir: &Path, text: &str, layout: Option<&str>, music: b
     let _ = std::fs::remove_file(&png);
     let mut img = image::load_from_memory(&bytes).ok()?.to_rgba8();
     // portrait pictures come out turned for the panel: show them upright
-    let shown = layout.map(str::to_string).unwrap_or(first_layout);
     if LAYOUTS.iter().any(|x| x.key == shown && x.portrait()) {
         img = image::imageops::rotate270(&img);
     }
@@ -710,6 +718,7 @@ struct App {
     city: String,
     ignore: String,
     adapter: String,
+    sgdb_key: String,
     custom: [u8; 3],
     logo: Option<egui::TextureHandle>,
     // the live view of the panel
@@ -745,6 +754,7 @@ impl App {
         let city = doc.get("weather_city").unwrap_or_default();
         let ignore = doc.get("fps_ignore").unwrap_or_default();
         let adapter = doc.get("pro_amd_adapter").unwrap_or_default();
+        let sgdb_key = doc.get("steamgriddb_key").unwrap_or_default();
         let custom = doc.get("pro_theme").and_then(|t| parse_hex(&t)).or_else(|| doc.get("pro_accent").and_then(|t| parse_hex(&t))).unwrap_or([255, 0, 240]);
         let (jobs, done) = match find_main_exe() {
             Some(exe) => {
@@ -791,6 +801,7 @@ impl App {
             city,
             ignore,
             adapter,
+            sgdb_key,
             custom,
             logo: image::load_from_memory(include_bytes!("../../assets/studio-icon.png")).ok().map(|i| {
                 let i = i.to_rgba8();
@@ -2056,6 +2067,127 @@ impl App {
                     Some(v) => self.set("pro_game_theme", v),
                     None => {}
                 }
+            }
+        });
+        section_title(
+            ui,
+            self.t("Game artwork & Showcase", "Ảnh game & Showcase"),
+            self.t(
+                "Shows the running game's title, logo or cover in the music slot, and lets you customize the Showcase poster background.",
+                "Hiển thị tên, logo hoặc ảnh bìa game trong ô nhạc và chọn poster nền cho Showcase.",
+            ),
+        );
+        card(ui, |ui| {
+            let mut game_media = self.bool_of("pro_game_media", true);
+            let lbl = self.t("Show running game in music slot", "Hiển thị game trong ô nhạc").to_string();
+            let help = self.t("Replaces music info with the active game's logo/cover and title.", "Thay ô nhạc bằng logo/bìa và tên game đang chạy.").to_string();
+            let mut ch = false;
+            row(ui, &lbl, &help, |ui| ch = toggle(ui, &mut game_media).changed());
+            if ch {
+                self.set("pro_game_media", if game_media { "true" } else { "false" });
+            }
+
+            if game_media {
+                divider(ui);
+                let art_mode = self.get_or("pro_game_art", "logo");
+                let lbl = self.t("Music slot artwork", "Kiểu ảnh ô nhạc").to_string();
+                let is_cover = art_mode.eq_ignore_ascii_case("cover") || art_mode.eq_ignore_ascii_case("poster");
+                row(ui, &lbl, "", |ui| {
+                    if ui.selectable_label(is_cover, self.t("Cover / Poster", "Ảnh bìa")).clicked() {
+                        self.set("pro_game_art", "cover");
+                    }
+                    if ui.selectable_label(!is_cover, self.t("Transparent logo", "Logo nền trong")).clicked() {
+                        self.set("pro_game_art", "logo");
+                    }
+                });
+            }
+
+            divider(ui);
+            let mut game_art_api = self.bool_of("game_art", true);
+            let lbl = self.t("Look up game artwork automatically", "Tự động tìm tên và ảnh game").to_string();
+            let help = self.t("Uses local Steam/Epic manifests and Steam Store / CDN (no key needed).", "Đọc Steam/Epic cục bộ và Steam Store / CDN (không cần key).").to_string();
+            let mut ch_api = false;
+            row(ui, &lbl, &help, |ui| ch_api = toggle(ui, &mut game_art_api).changed());
+            if ch_api {
+                self.set("game_art", if game_art_api { "true" } else { "false" });
+            }
+
+            divider(ui);
+            let lbl = self.t("SteamGridDB API key (optional)", "API key SteamGridDB (tùy chọn)").to_string();
+            let help = self.t("Improves logos and posters for non-Steam or indie games.", "Bổ sung logo/poster cho game ngoài Steam hoặc game ít phổ biến.").to_string();
+            let mut apply_sgdb = false;
+            row(ui, &lbl, &help, |ui| {
+                let stored = self.get("steamgriddb_key").unwrap_or_default();
+                if ui.button(self.t("Apply", "Áp dụng")).clicked() {
+                    apply_sgdb = true;
+                }
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.sgdb_key)
+                        .desired_width(200.0)
+                        .password(true)
+                        .hint_text("Bearer API key"),
+                );
+                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    apply_sgdb = true;
+                }
+                if !stored.is_empty() && self.sgdb_key.is_empty() {
+                    self.unset("steamgriddb_key");
+                }
+            });
+            if apply_sgdb {
+                let k = self.sgdb_key.trim().to_string();
+                if k.is_empty() {
+                    self.unset("steamgriddb_key");
+                } else {
+                    self.set("steamgriddb_key", &k);
+                }
+            }
+
+            divider(ui);
+            let poster = self.get_or("pro_game_poster", "");
+            let has_poster = !poster.trim().is_empty();
+            let lbl = self.t("Custom poster image for Showcase", "Ảnh poster riêng cho Showcase").to_string();
+            let help = if has_poster {
+                poster.clone()
+            } else {
+                self.t("Optional: overrides the auto-fetched game poster in the Showcase layout.", "Tùy chọn: thay ảnh poster tự động của Showcase bằng ảnh bạn chọn.").to_string()
+            };
+            let mut choose = false;
+            let mut clear = false;
+            row(ui, &lbl, &help, |ui| {
+                if has_poster {
+                    clear = ui.button(self.t("Remove", "Xóa ảnh")).clicked();
+                }
+                choose = ui.button(self.t("Choose image…", "Chọn ảnh…")).clicked();
+            });
+            if clear {
+                self.unset("pro_game_poster");
+            }
+            if choose {
+                if let Some(path) = custom_editor::pick_file("Poster image", &["png", "jpg", "jpeg", "bmp"]) {
+                    let result = (|| -> std::io::Result<String> {
+                        let dir = self.dir.join("assets").join("posters");
+                        std::fs::create_dir_all(&dir)?;
+                        let suffix = path.extension().and_then(|s| s.to_str()).unwrap_or("jpg").to_ascii_lowercase();
+                        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                        let name = format!("poster-{stamp}.{suffix}");
+                        std::fs::copy(&path, dir.join(&name))?;
+                        Ok(format!("assets/posters/{name}"))
+                    })();
+                    match result {
+                        Ok(p) => self.set("pro_game_poster", &p),
+                        Err(e) => self.save_error = Some(e.to_string()),
+                    }
+                }
+            }
+
+            divider(ui);
+            let mut dim = self.get("pro_game_bg_dim").and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(45).min(100);
+            let lbl = self.t("Darken Showcase poster", "Làm tối poster Showcase").to_string();
+            let mut ch_dim = false;
+            row(ui, &lbl, "", |ui| ch_dim = ui.add(egui::Slider::new(&mut dim, 0..=100).suffix(" %")).changed());
+            if ch_dim {
+                self.set("pro_game_bg_dim", &dim.to_string());
             }
         });
         section_title(ui, self.t("Night mode", "Chế độ ban đêm"), self.t("Dims the display (and can change colors) during the hours you choose.", "Giảm độ sáng (và có thể đổi màu) trong khung giờ bạn chọn."));

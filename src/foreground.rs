@@ -11,6 +11,17 @@
 //! `PROCESS_QUERY_LIMITED_INFORMATION`, the minimal access right that's
 //! enough for this).
 
+/// Metadata for the currently focused process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForegroundProcess {
+    /// OS process identifier.
+    pub pid: u32,
+    /// Clean executable name without directory or `.exe` suffix.
+    pub name: String,
+    /// Full path to the executable when available, empty otherwise.
+    pub path: String,
+}
+
 #[cfg(windows)]
 mod imp {
     use windows::Win32::Foundation::CloseHandle;
@@ -33,27 +44,53 @@ mod imp {
         }
     }
 
-    /// Exe file name (without path, without the ".exe" extension) of process `pid`.
+    /// Full executable path of process `pid`.
     /// `None` if the process can't be opened (a protected system process).
-    pub fn exe_name_of(pid: u32) -> Option<String> {
+    pub fn exe_path_of(pid: u32) -> Option<String> {
         unsafe {
             let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
             let mut buf = [0u16; 1024];
             let mut size = buf.len() as u32;
-            let result = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut size);
+            let result = QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &mut size,
+            );
             let _ = CloseHandle(process);
             result.ok()?;
             let path = String::from_utf16_lossy(&buf[..size as usize]);
-            let file_name = path.rsplit(['\\', '/']).next().unwrap_or(&path);
-            let name = file_name.strip_suffix(".exe").or_else(|| file_name.strip_suffix(".EXE")).unwrap_or(file_name);
-            (!name.trim().is_empty()).then(|| name.to_string())
+            (!path.trim().is_empty()).then_some(path)
         }
+    }
+
+    fn exe_name_from_path(path: &str) -> Option<String> {
+        let file_name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+        let name = file_name
+            .strip_suffix(".exe")
+            .or_else(|| file_name.strip_suffix(".EXE"))
+            .unwrap_or(file_name);
+        (!name.trim().is_empty()).then(|| name.to_string())
+    }
+
+    /// Exe file name (without path, without the ".exe" extension) of process `pid`.
+    /// `None` if the process can't be opened (a protected system process).
+    pub fn exe_name_of(pid: u32) -> Option<String> {
+        exe_name_from_path(&exe_path_of(pid)?)
+    }
+
+    /// Full foreground process info: PID, clean exe name, and full exe path.
+    pub fn foreground_process_info() -> Option<super::ForegroundProcess> {
+        let pid = foreground_pid()?;
+        let path = exe_path_of(pid)?;
+        let name = exe_name_from_path(&path)?;
+        Some(super::ForegroundProcess { pid, name, path })
     }
 
     /// (pid, exe name) of the process that owns the foreground window.
     pub fn foreground_process() -> Option<(u32, String)> {
-        let pid = foreground_pid()?;
-        Some((pid, exe_name_of(pid)?))
+        let info = foreground_process_info()?;
+        Some((info.pid, info.name))
     }
 
     /// Exe file name (without path, without the ".exe" extension) of the
@@ -89,7 +126,7 @@ mod imp {
     /// across compositors. If this happens, this function returns `None` —
     /// game mode still works (GPU>50% based), it's just that NOW PLAYING
     /// won't switch to the game's name.
-    pub fn foreground_exe_name() -> Option<String> {
+    pub fn foreground_process_info() -> Option<super::ForegroundProcess> {
         let (conn, screen_num) = x11rb::connect(None).ok()?;
         let root = conn.setup().roots.get(screen_num)?.root;
 
@@ -116,29 +153,36 @@ mod imp {
             return None;
         }
 
-        exe_name_from_pid(pid)
+        let (name, path) = exe_info_from_pid(pid)?;
+        Some(super::ForegroundProcess { pid, name, path })
+    }
+
+    pub fn foreground_exe_name() -> Option<String> {
+        foreground_process_info().map(|p| p.name)
     }
 
     fn intern_atom(conn: &impl Connection, name: &[u8]) -> Option<u32> {
         Some(conn.intern_atom(false, name).ok()?.reply().ok()?.atom)
     }
 
-    /// Exe name from `/proc/{pid}/exe` (full path, take the last file
-    /// name segment) — more accurate than `/proc/{pid}/comm`, which the
-    /// kernel truncates to a maximum of 15 characters. Falls back to
-    /// `comm` if `exe` can't be read (e.g. a process owned by another user
-    /// / extra protection).
-    fn exe_name_from_pid(pid: u32) -> Option<String> {
+    /// Exe name and full path from `/proc/{pid}/exe` — more accurate than
+    /// `/proc/{pid}/comm`, which the kernel truncates to 15 characters.
+    fn exe_info_from_pid(pid: u32) -> Option<(String, String)> {
         if let Ok(target) = fs::read_link(format!("/proc/{pid}/exe")) {
-            if let Some(name) = target.file_name().and_then(|n| n.to_str()) {
+            let path = target.to_string_lossy().into_owned();
+            if let Some(raw_name) = target.file_name().and_then(|n| n.to_str()) {
+                let name = raw_name
+                    .strip_suffix(".exe")
+                    .or_else(|| raw_name.strip_suffix(".EXE"))
+                    .unwrap_or(raw_name);
                 if !name.trim().is_empty() {
-                    return Some(name.to_string());
+                    return Some((name.to_string(), path));
                 }
             }
         }
         let comm = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
         let name = comm.trim();
-        (!name.is_empty()).then(|| name.to_string())
+        (!name.is_empty()).then(|| (name.to_string(), String::new()))
     }
 }
 
@@ -147,8 +191,13 @@ mod imp {
     pub fn foreground_exe_name() -> Option<String> {
         None
     }
+
+    pub fn foreground_process_info() -> Option<super::ForegroundProcess> {
+        None
+    }
 }
 
-pub use imp::foreground_exe_name;
+pub use imp::{foreground_exe_name, foreground_process_info};
 #[cfg(windows)]
+#[allow(unused_imports)]
 pub use imp::foreground_process;

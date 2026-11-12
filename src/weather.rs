@@ -234,7 +234,7 @@ fn us_state_abbr(a: &str) -> Option<&'static str> {
 /// Finds `"key":[ ... ]` and returns the `[...]` slice (brackets included),
 /// using string/escape-aware bracket-depth matching so it's not thrown off
 /// by anything before or after it in the surrounding JSON document.
-fn extract_array<'a>(haystack: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn extract_array<'a>(haystack: &'a str, key: &str) -> Option<&'a str> {
     let idx = haystack.find(key)?;
     let after = haystack[idx + key.len()..].trim_start();
     let after = after.strip_prefix(':')?.trim_start();
@@ -274,7 +274,7 @@ fn extract_array<'a>(haystack: &'a str, key: &str) -> Option<&'a str> {
 /// depth is tracked with string/escape awareness so a `}`/`{` inside a
 /// quoted value (or a nested array like `"postcodes":["..."]`) can't
 /// prematurely end an object.
-fn split_json_objects(s: &str) -> Vec<&str> {
+pub(crate) fn split_json_objects(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
     let mut depth = 0i32;
@@ -499,7 +499,7 @@ pub fn diag(city_override: Option<&str>) {
     }
 }
 
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -512,7 +512,7 @@ fn urlencode(s: &str) -> String {
 
 /// Finds `"key":<number>` (optionally with whitespace / a leading `-` / a
 /// decimal point) anywhere after the start of `haystack` and parses it.
-fn json_number(haystack: &str, key: &str) -> Option<f64> {
+pub(crate) fn json_number(haystack: &str, key: &str) -> Option<f64> {
     let idx = haystack.find(key)?;
     let after = &haystack[idx + key.len()..];
     let after = after.trim_start();
@@ -525,7 +525,7 @@ fn json_number(haystack: &str, key: &str) -> Option<f64> {
 }
 
 /// Finds `"key":true|false` anywhere after the start of `haystack`.
-fn json_bool(haystack: &str, key: &str) -> Option<bool> {
+pub(crate) fn json_bool(haystack: &str, key: &str) -> Option<bool> {
     let idx = haystack.find(key)?;
     let after = haystack[idx + key.len()..].trim_start();
     let after = after.strip_prefix(':')?.trim_start();
@@ -541,7 +541,7 @@ fn json_bool(haystack: &str, key: &str) -> Option<bool> {
 /// Finds `"key":"value"` anywhere after the start of `haystack`. Handles
 /// `\"` and `\\` escapes but nothing fancier (city/status names never need
 /// more than that).
-fn json_string(haystack: &str, key: &str) -> Option<String> {
+pub(crate) fn json_string(haystack: &str, key: &str) -> Option<String> {
     let idx = haystack.find(key)?;
     let after = haystack[idx + key.len()..].trim_start();
     let after = after.strip_prefix(':')?.trim_start();

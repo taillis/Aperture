@@ -495,6 +495,43 @@ impl Layer {
         }
     }
 
+    /// Fills the entire layer from tightly packed RGB888 pixels (alpha = 255).
+    pub(crate) fn fill_opaque_rgb(&mut self, rgb: &[u8]) {
+        if rgb.len() != self.w * self.h * 3 {
+            return;
+        }
+        for (src, dst) in rgb.chunks_exact(3).zip(self.px.chunks_exact_mut(4)) {
+            dst[0] = src[0];
+            dst[1] = src[1];
+            dst[2] = src[2];
+            dst[3] = 255;
+        }
+    }
+
+    /// Composites non-premultiplied RGBA8888 pixels at `(ox, oy)`.
+    pub(crate) fn blit_rgba(&mut self, ox: i32, oy: i32, rw: u32, rh: u32, rgba: &[u8]) {
+        if rgba.len() < (rw * rh * 4) as usize {
+            return;
+        }
+        for yy in 0..rh as i32 {
+            let dy = oy + yy;
+            if dy < 0 || dy as usize >= self.h {
+                continue;
+            }
+            for xx in 0..rw as i32 {
+                let dx = ox + xx;
+                if dx < 0 || dx as usize >= self.w {
+                    continue;
+                }
+                let si = (yy as usize * rw as usize + xx as usize) * 4;
+                let a = rgba[si + 3];
+                if a > 0 {
+                    self.over(dx, dy, (rgba[si], rgba[si + 1], rgba[si + 2]), a);
+                }
+            }
+        }
+    }
+
     /// Copies this layer, turned by 90 degrees, into `dst` (which must be `h` wide and `w` high):
     /// clockwise by default, counter-clockwise when `ccw`.
     pub(crate) fn rotate_into(&self, dst: &mut Layer, ccw: bool) {
