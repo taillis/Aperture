@@ -138,8 +138,8 @@ const DEFAULT_SILENCE_THRESHOLD: f32 = 0.005;
 /// Rising to `active-fps`, on the other hand, is ALWAYS immediate (no delay) as soon as
 /// there's sound, to keep the visualizer responsive.
 const DEFAULT_SILENCE_TIMEOUT_MS: u64 = 800;
-/// How often system info (CPU/mem, fairly expensive) is refreshed.
-const SYSINFO_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+/// Default sensor polling interval (CPU/RAM/GPU/network/disk), in milliseconds.
+const DEFAULT_SENSOR_REFRESH_MS: u32 = 500;
 
 /// Manual screen rotation override. Set to `true` if the display on your
 /// screen is upside-down; `false` if it's already correct. The
@@ -168,6 +168,7 @@ const DEFAULT_DEEPCOOL_UPDATE_MS: u64 = 1000;
 struct Config {
     idle_fps: f32,
     active_fps: f32,
+    sensor_refresh_ms: u32,
     silence_threshold: f32,
     silence_timeout: Duration,
     color_mode: ColorMode,
@@ -479,8 +480,8 @@ fn parse_color(raw: &str) -> anyhow::Result<ColorMode> {
 
 /// Parse command-line arguments, filling in defaults where not given.
 fn parse_args() -> anyhow::Result<Config> {
-    let mut idle_fps = DEFAULT_IDLE_FPS;
-    let mut active_fps = DEFAULT_ACTIVE_FPS;
+    let mut idle_fps_cli: Option<f32> = None;
+    let mut active_fps_cli: Option<f32> = None;
     // Also settable from the config file (see below, near `file.get_f32`) —
     // the CLI flags stay as the highest-priority override.
     let mut silence_threshold_cli: Option<f32> = None;
@@ -510,8 +511,8 @@ fn parse_args() -> anyhow::Result<Config> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--idle-fps" => idle_fps = next_f32(&mut args, "--idle-fps")?,
-            "--active-fps" => active_fps = next_f32(&mut args, "--active-fps")?,
+            "--idle-fps" => idle_fps_cli = Some(next_f32(&mut args, "--idle-fps")?),
+            "--active-fps" => active_fps_cli = Some(next_f32(&mut args, "--active-fps")?),
             "--silence-threshold" => {
                 silence_threshold_cli = Some(next_f32(&mut args, "--silence-threshold")?)
             }
@@ -642,7 +643,7 @@ fn parse_args() -> anyhow::Result<Config> {
         }
     }
 
-    if !(idle_fps > 0.0) || !(active_fps > 0.0) {
+    if idle_fps_cli.is_some_and(|v| !(v > 0.0)) || active_fps_cli.is_some_and(|v| !(v > 0.0)) {
         anyhow::bail!("--idle-fps and --active-fps must be numbers > 0");
     }
     if openrgb_poll_ms == 0 {
@@ -671,6 +672,24 @@ fn parse_args() -> anyhow::Result<Config> {
     // system/app volume, so a quiet listening level can dip under the
     // default threshold and look like silence — lower this if the EQ bars
     // don't react at low volume.
+    let idle_fps = match idle_fps_cli {
+        Some(v) => v,
+        None => file.get_f32("idle_fps").map_err(|e| anyhow::anyhow!(e))?.unwrap_or(DEFAULT_IDLE_FPS),
+    };
+    let active_fps = match active_fps_cli {
+        Some(v) => v,
+        None => file.get_f32("active_fps").map_err(|e| anyhow::anyhow!(e))?.unwrap_or(DEFAULT_ACTIVE_FPS),
+    };
+    if !(idle_fps > 0.0) || !(active_fps > 0.0) {
+        anyhow::bail!("idle_fps and active_fps must be numbers > 0");
+    }
+    let sensor_refresh_ms = file
+        .get_u32("sensor_refresh_ms")
+        .map_err(|e| anyhow::anyhow!(e))?
+        .unwrap_or(DEFAULT_SENSOR_REFRESH_MS);
+    if !(200..=10_000).contains(&sensor_refresh_ms) {
+        anyhow::bail!("sensor_refresh_ms: must be between 200 and 10000 (ms)");
+    }
     let silence_threshold = match silence_threshold_cli {
         Some(v) => v,
         None => file.get_f32("silence_threshold").map_err(|e| anyhow::anyhow!(e))?.unwrap_or(DEFAULT_SILENCE_THRESHOLD),
@@ -759,6 +778,7 @@ fn parse_args() -> anyhow::Result<Config> {
         ticker_refresh_min,
         idle_fps,
         active_fps,
+        sensor_refresh_ms,
         silence_threshold,
         silence_timeout: Duration::from_millis(silence_timeout_ms),
         color_mode,
@@ -811,6 +831,7 @@ const OVERRIDE_KEYS: &[&str] = &[
     "background_effect", "effect_palette", "effect_colors", "effect_palette_interval",
     "effect_speed", "effect_scale", "effect_brightness", "effect_fps", "effect_level", "effect_theme",
     "game_art", "game_art_source", "steamgriddb_key", "game_art_override",
+    "sensor_refresh_ms",
     "panel", "panel_size",
 ];
 
@@ -2111,7 +2132,8 @@ fn main() -> anyhow::Result<()> {
         // Note: `System::uptime()` does NOT follow this rule — it's a
         // static call that only reads an OS counter (not an expensive
         // process/CPU/RAM snapshot), so it's safe to call every frame in `draw_status_line`.
-        if last_sysinfo_refresh.elapsed() >= SYSINFO_REFRESH_INTERVAL {
+        let sensor_refresh = Duration::from_millis(config.sensor_refresh_ms as u64);
+        if last_sysinfo_refresh.elapsed() >= sensor_refresh {
             // Measure the elapsed time before resetting — used to compute power draw in Watts.
             let sysinfo_delta_ms = last_sysinfo_refresh.elapsed().as_millis() as u64;
 

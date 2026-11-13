@@ -2339,6 +2339,69 @@ impl App {
             ui.add_space(GAP - 10.0);
         }
 
+        // ---- Update interval & performance
+        section_title(
+            ui,
+            self.t("Update interval & performance", "Tần suất cập nhật & hiệu năng"),
+            self.t(
+                "Increase these intervals to lower CPU usage and protect 1% low FPS in competitive games.",
+                "Tăng các khoảng thời gian này để giảm tải CPU và giữ ổn định 1% low FPS khi chơi game.",
+            ),
+        );
+        card(ui, |ui| {
+            let mut ms: u32 = self
+                .get("sensor_refresh_ms")
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(500)
+                .clamp(200, 10_000);
+            let lbl = self.t("Sensor update interval", "Chu kỳ đọc cảm biến").to_string();
+            let help = self.t(
+                "How often CPU, RAM, GPU, disk and network readings are sampled (default: 500 ms).",
+                "Tần suất lấy mẫu CPU, RAM, GPU, ổ đĩa và mạng (mặc định: 500 ms).",
+            ).to_string();
+            let mut ch = false;
+            row(ui, &lbl, &help, |ui| {
+                ch = ui.add(egui::Slider::new(&mut ms, 250..=5000).step_by(50.0).suffix(" ms")).changed();
+            });
+            if ch {
+                self.set("sensor_refresh_ms", &ms.to_string());
+            }
+
+            divider(ui);
+            let mut afps: u32 = self
+                .get("active_fps")
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .map(|v| v.round() as u32)
+                .unwrap_or(15)
+                .clamp(1, 30);
+            let lbl = self.t("Display refresh rate with audio", "Tần số màn hình khi có âm thanh").to_string();
+            let help = self.t(
+                "Rises to this rate whenever game/system sound plays (default: 15 FPS). Use 1–2 FPS for Showcase or layouts without spectrum bars.",
+                "Tăng lên mức này khi có âm thanh (mặc định: 15 FPS). Dùng 1–2 FPS cho Showcase hoặc bố cục không có cột nhạc.",
+            ).to_string();
+            let mut ch_fps = false;
+            row(ui, &lbl, &help, |ui| {
+                ch_fps = ui.add(egui::Slider::new(&mut afps, 1..=30).suffix(" FPS")).changed();
+            });
+            if ch_fps {
+                self.set("active_fps", &afps.to_string());
+            }
+
+            divider(ui);
+            let mut etw_on = self.bool_of("fps_monitor", true);
+            let lbl = self.t("Measure game FPS (ETW)", "Đo FPS game (ETW)").to_string();
+            let help = self.t(
+                "Disable if high-FPS games feel heavier; game artwork still works via GPU > 50%. Requires display restart.",
+                "Tắt nếu game FPS cao bị nặng; ảnh game vẫn hoạt động qua GPU > 50%. Cần khởi động lại dịch vụ.",
+            ).to_string();
+            let mut ch_etw = false;
+            row(ui, &lbl, &help, |ui| ch_etw = toggle(ui, &mut etw_on).changed());
+            if ch_etw {
+                self.set_bool("fps_monitor", etw_on);
+                self.restart_needed = true;
+            }
+        });
+
         // ---- CPU fan
         section_title(ui, self.t("CPU fan", "Quạt CPU"), self.t("Read straight from the motherboard; HWiNFO or LibreHardwareMonitor are only needed on boards we cannot read.", "Đọc thẳng từ bo mạch chủ; chỉ cần HWiNFO hoặc LibreHardwareMonitor với bo mạch không đọc được."));
         card(ui, |ui| {
